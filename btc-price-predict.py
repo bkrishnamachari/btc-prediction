@@ -1,87 +1,126 @@
-import pandas as pd
-import numpy as np
+import pandas as pd, numpy as np, datetime as dt, matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error
-import matplotlib.pyplot as plt
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 
-# Load dataset
-# Expecting BTC-Hourly.csv in current directory with a column 'date' and 'close'
-# Data is assumed sorted from newest to oldest in the file sample, so we sort ascending
+# ------------------- hyper-params ------------------- #
+LOOK_BACK         = 24      # hours of history per sample
+FORECAST_HORIZON  = 4       # predict +1h…+4h
+FORECAST_INTERVAL = 4       # issue forecasts every 4 h
+TRAIN_DAYS        = 90
+TEST_DAYS         = 30
+EPOCHS            = 10
+BATCH_SIZE        = 16
+VERBOSE           = True    # toggle extra prints
+# ---------------------------------------------------- #
 
 def load_data(path='BTC-Hourly.csv'):
     df = pd.read_csv(path)
-    df = df.sort_values('date')  # chronological order
-    df.reset_index(drop=True, inplace=True)
-    return df
+    df['date'] = pd.to_datetime(df['date'])
+    return df.sort_values('date').reset_index(drop=True)
 
-def prepare_sequences(prices, look_back=24):
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(prices.reshape(-1, 1))
+def make_xy(scaled, look_back=LOOK_BACK):
     X, y = [], []
-    # Keep last 4 observations for test/prediction
-    for i in range(look_back, len(scaled) - 4):
-        X.append(scaled[i - look_back:i])
+    for i in range(look_back, len(scaled)):
+        X.append(scaled[i-look_back:i])
         y.append(scaled[i])
-    X = np.array(X)
-    y = np.array(y)
-    return X, y, scaler, scaled
+    return np.array(X), np.array(y)
 
-def build_model(look_back):
-    model = Sequential()
-    model.add(LSTM(50, input_shape=(look_back, 1)))
-    model.add(Dense(1))
-    model.compile(optimizer='adam', loss='mae')
-    return model
-
+def build_model(look_back=LOOK_BACK):
+    m = Sequential([
+        LSTM(50, input_shape=(look_back, 1)),
+        Dense(1)
+    ])
+    m.compile('adam', loss='mae')
+    return m
 
 def main():
-    look_back = 24
-    df = load_data()
-    prices = df['close'].values
+    df         = load_data()
+    last_date  = df['date'].iloc[-1]
 
-    X, y, scaler, scaled = prepare_sequences(prices, look_back)
+    train_from = last_date - dt.timedelta(days=TRAIN_DAYS)
+    test_from  = last_date - dt.timedelta(days=TEST_DAYS)
 
-    model = build_model(look_back)
-    model.fit(X, y, epochs=20, batch_size=16, verbose=0)
+    train_df   = df[(df['date'] >= train_from) & (df['date'] <  test_from)].copy()
+    full_df    = df[df['date'] >= train_from].copy()        # 30-day slice for history + test
 
-    # Generate 4-hour forecast using last look_back values
-    history = scaled[-look_back:].tolist()
-    preds = []
-    for _ in range(4):
-        x_input = np.array(history[-look_back:]).reshape(1, look_back, 1)
-        pred = model.predict(x_input, verbose=0)
-        history.append(pred[0, 0])
-        preds.append(pred[0, 0])
+    # ------------------------- scale + train ------------------------- #
+    scaler     = MinMaxScaler()
+    train_scaled = scaler.fit_transform(train_df['close'].values.reshape(-1,1))
+    X_train, y_train = make_xy(train_scaled)
 
-    preds = scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
+    model = build_model()
+    print(f"[INFO] Training on {len(X_train)} samples "
+          f"({TRAIN_DAYS} days, look_back={LOOK_BACK}) …")
+    model.fit(X_train, y_train,
+              epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=1)
+    print("[INFO] Training finished.\n")
 
-    # Actual values for next 4 hours
-    actual = prices[-4:]
+    # ----------------- prepare series for forecasting ---------------- #
+    full_df['scaled_close'] = scaler.transform(full_df['close'].values.reshape(-1,1))
+    scaled_series   = full_df['scaled_close'].tolist()
+    idx_offset      = full_df.index[0]
 
-    # Baseline: use previous hour's price
-    baseline = prices[-5:-1]
+    start_idx_7d    = df[df['date'] >= test_from].index[0]
 
-    mae_lstm = mean_absolute_error(actual, preds)
-    mae_base = mean_absolute_error(actual, baseline)
+    dates, preds, baselines, actuals = [], [], [], []
 
-    print(f"LSTM MAE for next 4 hours: {mae_lstm:.2f}")
-    print(f"Baseline MAE for next 4 hours: {mae_base:.2f}")
+    print("[INFO] Rolling forecasts:")
+    # iterate through issue times (one step BEFORE first prediction)
+    for issue_idx in range(start_idx_7d-FORECAST_HORIZON,
+                           len(df)-FORECAST_HORIZON,
+                           FORECAST_INTERVAL):
 
-    # Plot comparison
-    dates = pd.to_datetime(df['date'].values[-4:])
-    plt.figure(figsize=(10, 6))
-    plt.plot(dates, actual, label='Actual', marker='o')
-    plt.plot(dates, preds, label='LSTM Forecast', marker='o')
-    plt.plot(dates, baseline, label='Baseline', marker='o')
-    plt.legend()
-    plt.xticks(rotation=45)
-    plt.xlabel('Date')
-    plt.ylabel('Close Price')
-    plt.title('BTC Price Prediction - Next 4 Hours')
-    plt.tight_layout()
-    plt.show()
+        issue_time = df.at[issue_idx, 'date']
+        if VERBOSE:
+            print(f"  • issuing {FORECAST_HORIZON}-step forecast at "
+                  f"{issue_time:%Y-%m-%d %H:%M}")
+
+        hist_start = issue_idx - LOOK_BACK + 1
+        history = scaled_series[hist_start-idx_offset : issue_idx-idx_offset+1].copy()
+        last_obs_price = df.at[issue_idx, 'close']
+
+        # produce 4 recursive steps
+        for step in range(1, FORECAST_HORIZON+1):
+            x_in = np.array(history[-LOOK_BACK:]).reshape(1, LOOK_BACK, 1)
+            pred_s = model.predict(x_in, verbose=0)[0,0]
+            history.append(pred_s)
+
+            target_idx  = issue_idx + step
+            target_time = df.at[target_idx, 'date']
+
+            dates.append(target_time)
+            preds.append(scaler.inverse_transform([[pred_s]])[0,0])
+            baselines.append(last_obs_price)
+            actuals.append(df.at[target_idx, 'close'])
+
+            if VERBOSE and step == FORECAST_HORIZON:
+                print(f"     ↳ step {step}: "
+                      f"pred={preds[-1]:,.0f}  "
+                      f"base={last_obs_price:,.0f}  "
+                      f"actual={actuals[-1]:,.0f}  "
+                      f"→ {target_time:%m-%d %H:%M}")
+
+    # ---------------------- evaluation + plot ------------------------ #
+    lstm_mae = mean_absolute_error(actuals, preds)
+    base_mae = mean_absolute_error(actuals, baselines)
+    print(f"\n[RESULT] LSTM   MAE (multi-step) : {lstm_mae:,.2f}")
+    print(f"[RESULT] Baseline MAE            : {base_mae:,.2f}")
+
+    plt.figure(figsize=(13,7))
+    ctx_start = last_date - dt.timedelta(days=TRAIN_DAYS)
+    plt.plot(df[df['date'] >= ctx_start]['date'],
+             df[df['date'] >= ctx_start]['close'],
+             label='Actual (context)', alpha=.6)
+
+    plt.scatter(dates, actuals,  s=18, label='Actual (7-day test)', marker='o',  color='black')
+    plt.scatter(dates, preds,             label='LSTM forecast',    marker='^',  color='red')
+    plt.scatter(dates, baselines,         label='Naïve baseline',   marker='x',  color='green')
+
+    plt.title('BTC hourly close – rolling 4-hour-ahead forecasts')
+    plt.xlabel('Date / Time'); plt.ylabel('Price')
+    plt.legend(); plt.xticks(rotation=45); plt.tight_layout(); plt.show()
 
 if __name__ == '__main__':
     main()
