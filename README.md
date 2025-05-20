@@ -3,7 +3,7 @@
 This repository demonstrates a simple approach for forecasting short term Bitcoin prices using an LSTM network. The provided dataset contains several years of hourly BTC/USD candles and a training script that predicts the next few hours of the closing price.
 
 ## Contents
-- `BTC-Hourly.csv` – Hourly open/high/low/close and volume data.
+- `BTC-Hourly.csv` – Hourly open/high/low/close and volume data. Sourced from https://www.kaggle.com/datasets/prasoonkottarathil/btcinusd 
 - `btc-price-predict.py` – Training and evaluation script.
 
 ## Requirements
