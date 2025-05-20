@@ -36,4 +36,4 @@ Hyper‑parameters such as the look‑back window, forecast horizon and training
 Each row in `BTC-Hourly.csv` represents one hour of trading activity with columns for the open, high, low, close and volume. The script sorts the data chronologically before training and uses only the `close` column for prediction.
 
 ## License
-MIT
+This project is licensed under the [Creative Commons Attribution-NonCommercial 4.0 International License](https://creativecommons.org/licenses/by-nc/4.0/).
